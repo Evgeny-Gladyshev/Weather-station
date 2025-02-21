@@ -1,0 +1,268 @@
+#include <ESP8266WiFi.h>
+#include <WiFiClientSecure.h>
+#include <ArduinoJson.h>
+
+// ------------------------
+// Настройки подключения к Wi‑Fi
+// ------------------------
+const char* ssid = "YOUR_ssid";
+const char* password = "YOUR_password";
+
+// ------------------------
+// Параметры Телеграм
+// ------------------------
+const char* telegramBotToken = "YOUR_BOT_Token";
+const char* telegramChatId   = "YOUR_telegramChatId";
+
+// ------------------------
+// Параметры OpenWeatherMap
+// ------------------------
+const char* host = "api.openweathermap.org";
+const int httpsPort = 443;
+const String apiKey = "YOUR_API_openweathermap";
+const String city = "Chelyabinsk";
+// Формируем URL запроса (язык – русский, единицы измерения – метрические)
+String url = "/data/2.5/weather?q=" + city + "&appid=" + apiKey + "&units=metric&lang=ru";
+
+// ------------------------
+// Пин для встроенного светодиода
+// ------------------------
+// Для ESP8266 обычно используется LED_BUILTIN (обычно пин D4 или 2)
+// Светодиод активен при LOW (LOW – включает, HIGH – выключает)
+#define LED_PIN LED_BUILTIN
+
+// ------------------------
+// Функция для URL‑кодирования строки (для передачи в URL запроса)
+// ------------------------
+String urlencode(String str) {
+  String encoded = "";
+  char c;
+  char code0;
+  char code1;
+  for (size_t i = 0; i < str.length(); i++){
+    c = str.charAt(i);
+    if (isalnum(c)) {
+      encoded += c;
+    } else {
+      encoded += '%';
+      code0 = (c >> 4) & 0xF;
+      code1 = c & 0xF;
+      if (code0 > 9) code0 = 'A' + (code0 - 10);
+      else code0 = '0' + code0;
+      if (code1 > 9) code1 = 'A' + (code1 - 10);
+      else code1 = '0' + code1;
+      encoded += code0;
+      encoded += code1;
+    }
+  }
+  return encoded;
+}
+
+// ------------------------
+// Функция для отправки сообщения в Телеграм через Bot API
+// ------------------------
+void sendTelegramMessage(String message) {
+  WiFiClientSecure client;
+  client.setInsecure(); // отключаем проверку сертификата
+  const char* telegramHost = "api.telegram.org";
+  const int telegramPort = 443;
+  
+  // Формируем URL запроса для отправки сообщения
+  String urlTelegram = "/bot" + String(telegramBotToken) + "/sendMessage?chat_id=" +
+                       String(telegramChatId) + "&text=" + urlencode(message);
+  
+  Serial.println("Отправка сообщения в Телеграм...");
+  if (!client.connect(telegramHost, telegramPort)) {
+    Serial.println("Ошибка подключения к Telegram");
+    return;
+  }
+  
+  String request = String("GET ") + urlTelegram + " HTTP/1.1\r\n" +
+                   "Host: " + telegramHost + "\r\n" +
+                   "User-Agent: ESP8266\r\n" +
+                   "Connection: close\r\n\r\n";
+  client.print(request);
+  
+  String response = client.readString();
+  Serial.println("Ответ от Telegram:");
+  Serial.println(response);
+  client.stop();
+}
+
+// ------------------------
+// Функция setup: инициализация последовательного порта, Wi‑Fi и получение погоды
+// ------------------------
+void setup() {
+  Serial.begin(115200);
+  delay(10);
+  
+  // Инициализируем пин встроенного светодиода как выход и выключаем его
+  pinMode(LED_PIN, OUTPUT);
+  digitalWrite(LED_PIN, HIGH); // выключаем светодиод (активен при LOW)
+
+  // Включаем встроенный светодиод для индикации подключения к Wi-Fi
+  digitalWrite(LED_PIN, LOW);  // включаем светодиод (активен при LOW)
+  
+  Serial.print("Подключение к Wi‑Fi");
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println();
+  Serial.print("Подключено! IP адрес: ");
+  Serial.println(WiFi.localIP());
+
+  // Устанавливаем минимально возможную мощность передатчика (0 dBm)
+  WiFi.setOutputPower(1);
+  
+  // Получаем данные о погоде сразу после подключения
+  getWeather();
+}
+
+// ------------------------
+// Функция loop: обновление данных о погоде каждые 10 минут
+// ------------------------
+void loop() {
+  delay(3600000); // 600000 мс = 10 минут
+  getWeather();
+}
+
+// ------------------------
+// Функция getWeather: подключается к серверу, получает и парсит JSON-ответ,
+// извлекает все значения с пояснениями на русском языке, формирует сообщение и отправляет его в Телеграм;
+// также включает встроенный светодиод на 1 секунду.
+// ------------------------
+void getWeather() {
+  WiFiClientSecure client;
+  client.setInsecure(); // отключаем проверку сертификата
+  
+  Serial.println("Подключаемся к серверу OpenWeatherMap...");
+  if (!client.connect(host, httpsPort)) {
+    Serial.println("Ошибка подключения к серверу");
+    return;
+  }
+  
+  digitalWrite(LED_PIN, HIGH); // выключаем светодиод
+
+  // Формируем HTTP GET-запрос
+  String request = String("GET ") + url + " HTTP/1.1\r\n" +
+                   "Host: " + host + "\r\n" +
+                   "User-Agent: ESP8266\r\n" +
+                   "Connection: close\r\n\r\n";
+  client.print(request);
+  
+  // Считываем весь ответ от сервера в одну строку
+  String fullResponse = client.readString();
+  client.stop();
+  
+  Serial.println("Полученный ответ:");
+  Serial.println(fullResponse);
+  
+  // Находим разделитель между HTTP‑заголовками и телом ответа ("\r\n\r\n")
+  int headerEnd = fullResponse.indexOf("\r\n\r\n");
+  if (headerEnd == -1) {
+    Serial.println("Не удалось найти разделитель заголовков и тела");
+    return;
+  }
+  
+  // Извлекаем только тело ответа (JSON)
+  String payload = fullResponse.substring(headerEnd + 4);
+  
+  // Парсим JSON‑ответ с помощью ArduinoJson
+  DynamicJsonDocument doc(4096);
+  DeserializationError error = deserializeJson(doc, payload);
+  if (error) {
+    Serial.print("Ошибка парсинга JSON: ");
+    Serial.println(error.c_str());
+    return;
+  }
+  
+  // Извлекаем время расчёта и корректируем его с учётом смещения таймзоны
+  long dt = doc["dt"];
+  int tz = doc["timezone"];
+  time_t localTimestamp = dt + tz;
+  struct tm* timeinfo = gmtime(&localTimestamp);
+  char dtString[32];
+  strftime(dtString, sizeof(dtString), "%d-%m-%Y %H:%M:%S", timeinfo);
+  
+  // Извлекаем время восхода и заката солнца
+  long sunrise = doc["sys"]["sunrise"];
+  time_t localSunrise = sunrise + tz;
+  struct tm* suninfo = gmtime(&localSunrise);
+  char sunriseString[32];
+  strftime(sunriseString, sizeof(sunriseString), "%H:%M:%S", suninfo);
+  
+  long sunset = doc["sys"]["sunset"];
+  time_t localSunset = sunset + tz;
+  struct tm* setinfo = gmtime(&localSunset);
+  char sunsetString[32];
+  strftime(sunsetString, sizeof(sunsetString), "%H:%M:%S", setinfo);
+  
+  // Формируем сообщение с пояснениями для каждого поля JSON
+  String message = "";
+  
+  // Общая информация о городе
+  message += "Погода в городе " + String(doc["name"].as<const char*>()) + " (ID: " + String(doc["id"].as<long>()) + ")\n";
+  message += "Координаты:\n";
+  message += "  Долгота: " + String(doc["coord"]["lon"].as<float>()) + "\n";
+  message += "  Широта: " + String(doc["coord"]["lat"].as<float>()) + "\n\n";
+  
+  // Информация о погодных условиях
+  message += "Погодные условия:\n";
+  if(doc["weather"].size() > 0) {
+    message += "  Основное: " + String(doc["weather"][0]["main"].as<const char*>()) + "\n";
+    message += "  Описание: " + String(doc["weather"][0]["description"].as<const char*>()) + "\n";
+    message += "  Иконка: " + String(doc["weather"][0]["icon"].as<const char*>()) + "\n\n";
+  }
+  
+  // Основные параметры
+  message += "Основные параметры:\n";
+  message += "  Температура: " + String(doc["main"]["temp"].as<float>()) + " °C\n";
+  message += "  Ощущается как: " + String(doc["main"]["feels_like"].as<float>()) + " °C\n";
+  message += "  Минимальная температура: " + String(doc["main"]["temp_min"].as<float>()) + " °C\n";
+  message += "  Максимальная температура: " + String(doc["main"]["temp_max"].as<float>()) + " °C\n";
+  message += "  Давление: " + String(doc["main"]["pressure"].as<int>()) + " гПа\n";
+  message += "  Влажность: " + String(doc["main"]["humidity"].as<int>()) + " %\n";
+  if (!doc["main"]["sea_level"].isNull()) {
+    message += "  Давление (на уровне моря): " + String(doc["main"]["sea_level"].as<int>()) + " гПа\n";
+  }
+  if (!doc["main"]["grnd_level"].isNull()) {
+    message += "  Давление (на уровне земли): " + String(doc["main"]["grnd_level"].as<int>()) + " гПа\n";
+  }
+  message += "\n";
+  
+  // Видимость
+  message += "Видимость: " + String(doc["visibility"].as<int>()) + " м\n\n";
+  
+  // Ветер
+  message += "Ветер:\n";
+  message += "  Скорость: " + String(doc["wind"]["speed"].as<float>()) + " м/с\n";
+  message += "  Направление: " + String(doc["wind"]["deg"].as<int>()) + "°\n\n";
+  
+  // Облачность
+  message += "Облачность: " + String(doc["clouds"]["all"].as<int>()) + " %\n\n";
+  
+  // Время расчёта и системная информация
+  message += "Время расчёта данных:\n";
+  message += "  Время: " + String(dtString) + " (UTC+" + String(tz/3600) + ")\n\n";
+  message += "Системная информация:\n";
+  message += "  Страна: " + String(doc["sys"]["country"].as<const char*>()) + "\n";
+  message += "  Восход солнца: " + String(sunriseString) + "\n";
+  message += "  Закат: " + String(sunsetString) + "\n\n";
+  
+  // Код ответа
+  message += "Код ответа: " + String(doc["cod"].as<int>());
+  
+  // Выводим сформированное сообщение в Serial Monitor
+  Serial.println("Сформированное сообщение для Telegram:");
+  Serial.println(message);
+  
+  // Включаем встроенный светодиод на 1 секунду для индикации успешного получения данных
+  digitalWrite(LED_PIN, LOW);  // включаем светодиод (активен при LOW)
+  delay(1000);
+  digitalWrite(LED_PIN, HIGH); // выключаем светодиод
+  
+  // Отправляем сформированное сообщение в Телеграм
+  sendTelegramMessage(message);
+}
